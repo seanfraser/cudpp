@@ -13,13 +13,41 @@
 #include <limits.h>
 #include <float.h>
 #include <algorithm>
+#include <boost/multiprecision/cpp_bin_float.hpp>
+#include "tensor.h"
+#include <vector>
+#include <math.h>
+
+typedef boost::multiprecision::cpp_bin_float_100 mp_100;
+
+typedef double dtype;
+
+template <typename T>
+  const T RelativeError(T x, T y) {
+      T xAbs = abs(x);
+      T yAbs = abs(y);
+      T diff = abs(xAbs - yAbs);
+      return diff / std::min(xAbs, yAbs);
+    }
+
+void prefix_sum_mp_100(mp_100* arr, const size_t increment, const size_t N) {
+    mp_100 sum(0);
+    for (size_t i = 0; i < N; i += increment) {
+          sum += mp_100(arr[i]);
+          arr[i] = mp_100(sum);
+        }
+  }
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // export C interface
 extern "C" 
-void computeSumScanGold( float* reference, const float* idata, 
+void computeSumScanGold( dtype* reference, const dtype* idata, 
                          const unsigned int len,
                          const CUDPPConfiguration &config);
+
+extern "C"
+void computeRMSError(dtype* h_idata, dtype* h_odata, size_t numElements);
 
 extern "C" 
 void computeMultiplyScanGold( float* reference, const float* idata, 
@@ -77,7 +105,7 @@ computeMinSegmentedScanGold(float* reference, const float* idata,
 //! @param config     Options for the scan
 ////////////////////////////////////////////////////////////////////////////////
 void
-computeSumScanGold( float *reference, const float *idata, 
+computeSumScanGold( dtype *reference, const dtype *idata, 
                     const unsigned int len,
                     const CUDPPConfiguration &config) 
 {
@@ -132,6 +160,46 @@ computeSumScanGold( float *reference, const float *idata,
     }   
 }
 
+void
+computeRMSError(dtype* h_idata, dtype* h_odata, size_t numElements)
+{
+    std::vector<mp_100> tensor_ref;
+    for (size_t i = 0; i < numElements; ++i) {
+        tensor_ref.emplace_back(mp_100(h_idata[i]));
+    }
+    mp_100* array_ref = tensor_ref.data();
+
+    prefix_sum_mp_100(array_ref, 1, numElements);
+
+    mp_100 max_rel_err(0);
+    mp_100 min_rel_err(1);
+    mp_100 avg_rel_err(0);
+    mp_100 rms_rel_err(0);
+    for (size_t i = 1; i < numElements; ++i) {
+      mp_100 err = RelativeError(array_ref[i], mp_100(h_odata[i]));
+      if (err > max_rel_err) {
+        max_rel_err = err;
+      }
+      if (err < min_rel_err) {
+        min_rel_err = err;
+      }
+      avg_rel_err += err;
+      rms_rel_err += err * err;
+    }
+    avg_rel_err = avg_rel_err / numElements;
+    rms_rel_err = sqrt(rms_rel_err / numElements);
+
+    std::cout << "RMS error: " << rms_rel_err << std::endl;
+    std::cout << "avg error: " << avg_rel_err << std::endl;
+    std::cout << "min error: " << min_rel_err << std::endl;
+    std::cout << "max error: " << max_rel_err << std::endl;
+
+    std::cout << "last element from CPU host (ref): ";
+    std::cout << std::setprecision(12) << array_ref[numElements-1];
+    std::cout << std::endl;
+
+    tensor_ref = std::vector<mp_100>();
+}
 ////////////////////////////////////////////////////////////////////////////////
 //! Compute reference data set for multiply-scan
 //! Each element is the sum of the elements before it in the array.
